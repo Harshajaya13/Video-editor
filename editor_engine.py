@@ -1,76 +1,108 @@
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 import pandas as pd
+import os
 
 def process_and_render(video_path, df, output_path="final_edit.mp4"):
     """
-    1. Groups consecutive '1's into clips.
-    2. Checks volume changes between clips.
-    3. Applies Fades if the mood changes too fast.
+    Takes the video and the Decision Dataframe.
+    Cuts the video based on 'ai_decision' column (1 = Keep, 0 = Cut).
+    Safely handles missing volume data.
     """
-    original_video = VideoFileClip(video_path)
-    clips_to_join = []
     
-    # --- 1. GROUPING LOGIC (Turn rows into Time Segments) ---
-    # We turn [0, 1, 1, 1, 0, 1, 1] into [(0.5, 2.0), (3.0, 4.0)]
+    # 1. VALIDATION
+    if 'ai_decision' not in df.columns:
+        print("❌ Error: Dataframe is missing 'ai_decision' column.")
+        return None
+
+    # Check if we have any '1's (Keep)
     keep_indices = df[df['ai_decision'] == 1].index.tolist()
-    
     if not keep_indices:
-        return None # AI rejected everything
+        print("❌ AI decided to cut the whole video.")
+        return None
 
+    print(f"🎬 Loading Video: {video_path}")
+    try:
+        original_video = VideoFileClip(video_path)
+    except Exception as e:
+        print(f"❌ Error loading video file: {e}")
+        return None
+
+    # 2. GROUPING INDICES INTO TIME SEGMENTS
     segments = []
-    start_idx = keep_indices[0]
-    prev_idx = keep_indices[0]
+    if keep_indices:
+        start_idx = keep_indices[0]
+        prev_idx = keep_indices[0]
 
-    for idx in keep_indices[1:]:
-        if idx == prev_idx + 1:
-            prev_idx = idx # Continue the segment
-        else:
-            segments.append((start_idx, prev_idx)) # Close segment
-            start_idx = idx
-            prev_idx = idx
-    segments.append((start_idx, prev_idx)) # Close final segment
+        for idx in keep_indices[1:]:
+            # Check if indices are consecutive
+            if idx == prev_idx + 1:
+                prev_idx = idx
+            else:
+                segments.append((start_idx, prev_idx))
+                start_idx = idx
+                prev_idx = idx
+        segments.append((start_idx, prev_idx))
 
-    # --- 2. EDITING LOGIC (The "Smart Fades") ---
-    previous_rms = 0.5 # Default start value
+    # 3. SMART EDITING LOOP
+    clips_to_join = []
+    previous_vol = 0.5 
     
-    print(f"🎬 Editing {len(segments)} segments...")
+    # Check if volume data exists to allow smart fading
+    has_volume_data = 'rms_volume' in df.columns
+    
+    print(f"✂️  Cutting {len(segments)} segments...")
 
-    for start_row, end_row in segments:
-        # Get Time & Volume Data
+    for i, (start_row, end_row) in enumerate(segments):
+        # Get Timestamps
         start_time = df.loc[start_row, 'timestamp']
-        # Add 0.5s buffer to end time so it doesn't cut abruptly
-        end_time = df.loc[end_row, 'timestamp'] + 0.5 
+        # Add 0.5s buffer but don't go past video end
+        end_time = min(df.loc[end_row, 'timestamp'] + 0.5, original_video.duration)
         
-        # Calculate Average Volume of THIS specific segment
-        segment_rms = df.loc[start_row:end_row, 'rms_volume'].mean()
-
-        # Create the basic cut
+        # Extract the Clip
         clip = original_video.subclip(start_time, end_time)
 
-        # --- THE FADE CHECK ---
-        # Logic: If we go from Quiet (Low RMS) -> Loud (High RMS), Fade In.
-        # Otherwise, just do a hard Jump Cut (it feels faster/viral).
-        
-        is_quiet_before = previous_rms < 0.02
-        is_loud_now = segment_rms > 0.1
-        
-        if is_quiet_before and is_loud_now:
-            print(f"   ✨ Adding Fade In at {start_time}s (Quiet -> Loud)")
-            clip = clip.fadein(1.0) # 1 Second smooth entry
+        # --- SAFE FADE LOGIC ---
+        if has_volume_data:
+            # Get average volume of THIS specific clip
+            current_vol = df.loc[start_row:end_row, 'rms_volume'].mean()
+
+            # Logic: Fade in if we jump from Silence -> Loud
+            is_quiet_before = previous_vol < 0.05
+            is_loud_now = current_vol > 0.1
+
+            if i > 0 and (is_quiet_before and is_loud_now):
+                print(f"   ✨ Smart Fade-In at {start_time}s")
+                clip = clip.fadein(1.0).audio_fadein(1.0)
+            else:
+                # Standard smooth cut
+                clip = clip.audio_fadein(0.1).audio_fadeout(0.1)
+            
+            previous_vol = current_vol
         else:
-            # Optional: Add a tiny 0.1s crossfade just to prevent audio "pops"
-            clip = clip.audio_fadein(0.05).audio_fadeout(0.05)
+            # Fallback: Just do smooth cuts if no volume data
+            clip = clip.audio_fadein(0.1).audio_fadeout(0.1)
 
         clips_to_join.append(clip)
-        
-        # Update tracker
-        previous_rms = segment_rms
 
-    # --- 3. RENDERING ---
-    print("💾 Combining clips...")
-    final_video = concatenate_videoclips(clips_to_join, method="compose")
-    
-    # We write to a specific file
-    final_video.write_videofile(output_path, codec="libx264", audio_codec="aac", logger=None)
-    
-    return output_path
+    # 4. RENDER FINAL VIDEO
+    if clips_to_join:
+        print("💾 Rendering final file...")
+        try:
+            final_video = concatenate_videoclips(clips_to_join, method="compose")
+            
+            final_video.write_videofile(
+                output_path, 
+                codec="libx264", 
+                audio_codec="aac", 
+                fps=original_video.fps,  # <--- CRITICAL FIX INCLUDED
+                logger="bar" # Shows a progress bar
+            )
+            print("✅ Done!")
+            
+            # Close the clip to release memory
+            original_video.close()
+            return output_path
+            
+        except Exception as e:
+            print(f"❌ Error during rendering: {e}")
+            return None
