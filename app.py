@@ -2,127 +2,141 @@ import streamlit as st
 import pandas as pd
 import tempfile
 import os
-import editor_engine  # Ensure editor_engine.py is in the folder
+import editor_engine      # The Scissors (Cuts the video)
+import feature_extractor  # The Eyes (Extracts volume, emotions, brightness)
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="AI Video Editor", layout="wide")
-st.title("🧠 AI Video Editor: The Perception Engine")
+st.set_page_config(page_title="AI Video Editor", layout="wide", page_icon="🎬")
+st.title("🧠 AI Video Editor: The Emotion Engine")
 
 # --- INITIALIZE SESSION STATE ---
-# This acts as the "Memory" of the app so data isn't lost when you click buttons
-if 'df' not in st.session_state:
-    st.session_state['df'] = None
 if 'video_path' not in st.session_state:
     st.session_state['video_path'] = None
-if 'analysis_done' not in st.session_state:
-    st.session_state['analysis_done'] = False
+if 'df_features' not in st.session_state:
+    st.session_state['df_features'] = None
 
-# --- STEP 1: UPLOAD FILES ---
-col1, col2 = st.columns(2)
-
-with col1:
-    uploaded_video = st.file_uploader("1️⃣ Upload Raw Video", type=["mp4", "mov", "avi"])
-
-with col2:
-    uploaded_csv = st.file_uploader("2️⃣ Upload AI Scores (CSV)", type=["csv"], help="Upload the scored_features.csv here")
-
-# Handle Video Upload
-if uploaded_video:
-    # Only save if we haven't already (prevents reloading on every click)
-    if st.session_state['video_path'] is None:
-        tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-        tfile.write(uploaded_video.read())
-        st.session_state['video_path'] = tfile.name
+# --- SIDEBAR: GLOBAL SETTINGS ---
+with st.sidebar:
+    st.header("📁 Project Files")
+    uploaded_video = st.file_uploader("Upload Raw Video (MP4/MOV)", type=["mp4", "mov", "avi"])
     
-    st.video(st.session_state['video_path'])
+    if uploaded_video:
+        # Save video to temp file only once
+        if st.session_state['video_path'] is None:
+            tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            tfile.write(uploaded_video.read())
+            st.session_state['video_path'] = tfile.name
+        
+        st.video(st.session_state['video_path'])
+        st.success(f"Video Loaded: {uploaded_video.name}")
 
-# --- STEP 2: ANALYZE BUTTON ---
-if st.button("🚀 Load & Analyze Data"):
-    if uploaded_csv is not None:
-        st.info("📂 Loading Engagement Scores from CSV...")
-        try:
-            # 1. READ CSV (Handle headers/no-headers)
-            try:
-                df = pd.read_csv(uploaded_csv)
-                # Check if first column is numeric (implies no header)
-                float(df.columns[0])
-                uploaded_csv.seek(0)
-                df = pd.read_csv(uploaded_csv, header=None)
-            except:
-                pass # Likely has headers
+# --- MAIN TABS ---
+tab1, tab2 = st.tabs(["1️⃣ Extract Features (The Eyes)", "2️⃣ AI Editor (The Brain)"])
 
-            # 2. MAP COLUMNS
-            # Try to find 'score' and 'timestamp'
-            if 'score' not in df.columns:
-                # Assume Index 5 is score based on your data
-                df['score'] = df.iloc[:, 5]
-            if 'timestamp' not in df.columns:
-                df['timestamp'] = df.iloc[:, 0]
-
-            # 3. CLEAN DATA (Force Numeric)
-            df['score'] = pd.to_numeric(df['score'], errors='coerce')
-            df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
-            df.dropna(subset=['score', 'timestamp'], inplace=True)
-
-            # 4. ADD DUMMY VOLUME (Safety for Engine)
-            if 'rms_volume' not in df.columns:
-                df['rms_volume'] = 0.5
-
-            # SAVE TO SESSION STATE
-            st.session_state['df'] = df
-            st.session_state['analysis_done'] = True
-            st.success("✅ Data Loaded Successfully!")
-
-        except Exception as e:
-            st.error(f"Error processing CSV: {e}")
+# ==========================================
+# TAB 1: FEATURE EXTRACTION (The Spy)
+# ==========================================
+with tab1:
+    st.header("🕵️‍♀️ Step 1: Analyze Video")
+    st.markdown("This step scans the video for **Volume**, **Motion**, and **Emotions**.")
+    
+    if st.session_state['video_path']:
+        if st.button("🚀 Start Feature Extraction"):
+            with st.spinner("Analyzing frames for smiles, audio, and action..."):
+                # Call the Feature Extractor Script
+                df = feature_extractor.extract_all_features(
+                    st.session_state['video_path'], 
+                    output_csv="raw_features_for_rohit.csv"
+                )
+                st.session_state['df_features'] = df
+                st.success("✅ Analysis Complete!")
+                st.dataframe(df.head())
     else:
-        st.warning("⚠️ Please upload the 'scored_features.csv' first.")
+        st.info("Please upload a video in the sidebar first.")
 
-# --- STEP 3: INTERACTIVE EDITING (Visible only after analysis) ---
-if st.session_state['analysis_done'] and st.session_state['df'] is not None:
-    st.write("---")
-    st.subheader("🎛️ Director's Cut Controls")
+    # Allow downloading the raw data for Rohit (or yourself)
+    if st.session_state['df_features'] is not None:
+        csv = st.session_state['df_features'].to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download Raw CSV", csv, "raw_features.csv", "text/csv")
+# ==========================================
+# TAB 2: AI EDITING (The Brain & Scissors)
+# ==========================================
+with tab2:
+    st.header("🎬 Step 2: Create the Edit")
     
-    df = st.session_state['df'].copy() # Work on a copy
+    # User can upload a CSV (from Rohit) OR use the one just generated in Tab 1
+    uploaded_csv = st.file_uploader("Upload CSV (Optional - if not generated in Tab 1)", type=["csv"])
     
-    # 1. THE SLIDER (Dynamic Adjustment)
-    # Users can drag this and immediately see the graph change
-    strictness = st.slider("Strictness (Keep Top %)", 
-                           min_value=0.1, max_value=1.0, value=0.4, 
-                           help="Lower = Keep More Video. Higher = Keep Only Best Parts.")
-    
-    # 2. APPLY LOGIC INSTANTLY
-    threshold = df['score'].quantile(1.0 - strictness)
-    df['ai_decision'] = df['score'].apply(lambda x: 1 if x >= threshold else 0)
-    
-    # 3. SHOW STATS
-    col_a, col_b = st.columns(2)
-    keep_count = df['ai_decision'].sum()
-    total_count = len(df)
-    retention = int((keep_count / total_count) * 100)
-    
-    col_a.metric("Retention Rate", f"{retention}%", f"Keeping {keep_count} segments")
-    col_a.write(f"**Score Cutoff:** {threshold:.4f}")
-    
-    # 4. VISUALIZE
-    # Color the chart: Green for Keep, Red for Cut? 
-    # Streamlit charts are simple, so we just show the score line with a threshold rule
-    st.line_chart(df[['score']])
-    st.caption("The line represents engagement. Everything above the threshold (implicit) is kept.")
+    # Determine which DataFrame to use
+    active_df = None
+    if uploaded_csv:
+        active_df = pd.read_csv(uploaded_csv)
+    elif st.session_state['df_features'] is not None:
+        active_df = st.session_state['df_features'].copy()
+        
+    if active_df is not None:
+        st.divider()
+        st.subheader("🧠 The Brain: Define 'Engagement'")
+        
+        # --- A. SCORING LOGIC (The "Brain" Formula) ---
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: w_vol = st.slider("🔊 Volume Weight", 0.0, 5.0, 1.0)
+        with col2: w_happy = st.slider("😊 Happy Weight", 0.0, 5.0, 2.0)
+        with col3: w_shock = st.slider("😲 Surprise Weight", 0.0, 5.0, 2.5)
+        with col4: w_motion = st.slider("🏃 Motion Weight", 0.0, 5.0, 1.0)
 
-    # --- STEP 4: RENDER BUTTON ---
-    st.write("---")
-    if st.button("✂️ Render Final Movie"):
-        if st.session_state['video_path']:
-            with st.spinner("🎬 The AI is cutting and stitching your video..."):
-                
-                # Pass the dynamically modified 'df' to the engine
-                output_file = editor_engine.process_and_render(st.session_state['video_path'], df)
-                
-                if output_file:
-                    st.success("✨ Render Complete! Here is your AI Edit:")
-                    st.video(output_file)
-                else:
-                    st.error("❌ The engine returned no video. Try lowering the strictness.")
-        else:
-            st.error("❌ Video file lost. Please upload again.")
+        # Normalize Volume (roughly 0.0 to 1.0) for fair math
+        # Safety check: avoid division by zero
+        max_vol = active_df['rms_volume'].max()
+        if max_vol == 0: max_vol = 1
+        active_df['norm_vol'] = active_df['rms_volume'] / max_vol
+
+        # Handle missing columns safely (if using an old CSV)
+        if 'prob_happy' not in active_df: active_df['prob_happy'] = 0
+        if 'prob_surprise' not in active_df: active_df['prob_surprise'] = 0
+        if 'motion_score' not in active_df: active_df['motion_score'] = 0
+
+        # CALCULATE SCORE
+        active_df['engagement_score'] = (
+            (active_df['norm_vol'] * w_vol) +
+            (active_df['prob_happy'] * w_happy) +
+            (active_df['prob_surprise'] * w_shock) +
+            (active_df['motion_score'] * w_motion)
+        )
+
+        # Preview Score
+        st.line_chart(active_df['engagement_score'])
+        
+        # --- B. EDITING CONTROLS (The Scissors) ---
+        st.divider()
+        st.subheader("✂️ The Cut")
+        
+        strictness = st.slider("Strictness (Keep Top %)", 0.1, 1.0, 0.4)
+        
+        # Calculate the cutoff score
+        threshold = active_df['engagement_score'].quantile(1.0 - strictness)
+        st.write(f"**Keeping segments with Score > {threshold:.2f}**")
+        
+        # --- 🔥 THE CRITICAL FIX IS HERE 🔥 ---
+        # We must create the 'ai_decision' column BEFORE rendering
+        active_df['ai_decision'] = active_df['engagement_score'].apply(lambda x: 1 if x >= threshold else 0)
+        
+        # Show stats
+        keep_count = active_df['ai_decision'].sum()
+        st.caption(f"Will keep {keep_count} seconds of video.")
+
+        if st.button("✨ Render Final Video"):
+            if st.session_state['video_path']:
+                with st.spinner("Cutting and stitching..."):
+                    # Now 'active_df' contains 'ai_decision', so the engine will be happy
+                    output_file = editor_engine.process_and_render(
+                        st.session_state['video_path'], 
+                        active_df
+                    )
+                    if output_file:
+                        st.success("🎉 Done!")
+                        st.video(output_file)
+            else:
+                st.error("Video file is missing.")
+    else:
+        st.info("Waiting for data... Go to Tab 1 to analyze a video OR upload a CSV here.")
