@@ -58,14 +58,15 @@ with tab1:
     if st.session_state['df_features'] is not None:
         csv = st.session_state['df_features'].to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Raw CSV", csv, "raw_features.csv", "text/csv")
-# ==========================================
+        
+ # ==========================================
 # TAB 2: AI EDITING (The Brain & Scissors)
 # ==========================================
 with tab2:
     st.header("🎬 Step 2: Create the Edit")
     
-    # User can upload a CSV (from Rohit) OR use the one just generated in Tab 1
-    uploaded_csv = st.file_uploader("Upload CSV (Optional - if not generated in Tab 1)", type=["csv"])
+    # 1. UPLOAD BOX (Works for BOTH Raw files and Rohit's files)
+    uploaded_csv = st.file_uploader("Upload CSV (Raw from Tab 1 OR Scored from Rohit)", type=["csv"])
     
     # Determine which DataFrame to use
     active_df = None
@@ -76,59 +77,77 @@ with tab2:
         
     if active_df is not None:
         st.divider()
-        st.subheader("🧠 The Brain: Define 'Engagement'")
         
-        # --- A. SCORING LOGIC (The "Brain" Formula) ---
-        col1, col2, col3, col4 = st.columns(4)
-        with col1: w_vol = st.slider("🔊 Volume Weight", 0.0, 5.0, 1.0)
-        with col2: w_happy = st.slider("😊 Happy Weight", 0.0, 5.0, 2.0)
-        with col3: w_shock = st.slider("😲 Surprise Weight", 0.0, 5.0, 2.5)
-        with col4: w_motion = st.slider("🏃 Motion Weight", 0.0, 5.0, 1.0)
-
-        # Normalize Volume (roughly 0.0 to 1.0) for fair math
-        # Safety check: avoid division by zero
-        max_vol = active_df['rms_volume'].max()
-        if max_vol == 0: max_vol = 1
-        active_df['norm_vol'] = active_df['rms_volume'] / max_vol
-
-        # Handle missing columns safely (if using an old CSV)
-        if 'prob_happy' not in active_df: active_df['prob_happy'] = 0
-        if 'prob_surprise' not in active_df: active_df['prob_surprise'] = 0
-        if 'motion_score' not in active_df: active_df['motion_score'] = 0
-
-        # CALCULATE SCORE
-        active_df['engagement_score'] = (
-            (active_df['norm_vol'] * w_vol) +
-            (active_df['prob_happy'] * w_happy) +
-            (active_df['prob_surprise'] * w_shock) +
-            (active_df['motion_score'] * w_motion)
-        )
-
-        # Preview Score
-        st.line_chart(active_df['engagement_score'])
+        # --- SMART LOGIC: Is this Rohit's file or a Raw file? ---
         
+        # Check if Rohit already gave us a score (looking for 'score', 'pred', or 'engagement_score')
+        # We normalize everything to 'engagement_score'
+        is_pre_scored = False
+        
+        if 'score' in active_df.columns:
+            active_df['engagement_score'] = active_df['score']
+            is_pre_scored = True
+        elif 'pred' in active_df.columns:
+            active_df['engagement_score'] = active_df['pred']
+            is_pre_scored = True
+        elif 'engagement_score' in active_df.columns:
+            is_pre_scored = True
+
+        # --- PATH A: ROHIT'S FILE (Pre-Scored) ---
+        if is_pre_scored:
+            st.success("✨ Rohit's Pre-Scored Data Detected! Skipping manual calculation.")
+            st.line_chart(active_df['engagement_score'])
+            
+        # --- PATH B: RAW FILE (Manual Calculation) ---
+        else:
+            st.subheader("🧠 The Brain: Define 'Engagement'")
+            st.info("No score found. Using Manual Sliders.")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1: w_vol = st.slider("🔊 Volume Weight", 0.0, 5.0, 1.0)
+            with col2: w_happy = st.slider("😊 Happy Weight", 0.0, 5.0, 2.0)
+            with col3: w_shock = st.slider("😲 Surprise Weight", 0.0, 5.0, 2.5)
+            with col4: w_motion = st.slider("🏃 Motion Weight", 0.0, 5.0, 1.0)
+
+            # Normalize Volume
+            max_vol = active_df['rms_volume'].max()
+            if max_vol == 0: max_vol = 1
+            active_df['norm_vol'] = active_df['rms_volume'] / max_vol
+
+            # Safety checks for missing columns
+            if 'prob_happy' not in active_df: active_df['prob_happy'] = 0
+            if 'prob_surprise' not in active_df: active_df['prob_surprise'] = 0
+            if 'motion_score' not in active_df: active_df['motion_score'] = 0
+
+            # CALCULATE SCORE MANUALLY
+            active_df['engagement_score'] = (
+                (active_df['norm_vol'] * w_vol) +
+                (active_df['prob_happy'] * w_happy) +
+                (active_df['prob_surprise'] * w_shock) +
+                (active_df['motion_score'] * w_motion)
+            )
+            st.line_chart(active_df['engagement_score'])
+
         # --- B. EDITING CONTROLS (The Scissors) ---
+        # This part runs for BOTH paths!
         st.divider()
         st.subheader("✂️ The Cut")
         
         strictness = st.slider("Strictness (Keep Top %)", 0.1, 1.0, 0.4)
         
-        # Calculate the cutoff score
+        # Calculate Threshold
         threshold = active_df['engagement_score'].quantile(1.0 - strictness)
         st.write(f"**Keeping segments with Score > {threshold:.2f}**")
         
-        # --- 🔥 THE CRITICAL FIX IS HERE 🔥 ---
-        # We must create the 'ai_decision' column BEFORE rendering
+        # APPLY DECISION (Create the 'ai_decision' column)
         active_df['ai_decision'] = active_df['engagement_score'].apply(lambda x: 1 if x >= threshold else 0)
         
-        # Show stats
         keep_count = active_df['ai_decision'].sum()
         st.caption(f"Will keep {keep_count} seconds of video.")
 
         if st.button("✨ Render Final Video"):
             if st.session_state['video_path']:
                 with st.spinner("Cutting and stitching..."):
-                    # Now 'active_df' contains 'ai_decision', so the engine will be happy
                     output_file = editor_engine.process_and_render(
                         st.session_state['video_path'], 
                         active_df
