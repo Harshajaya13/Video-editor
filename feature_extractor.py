@@ -4,133 +4,101 @@ import pandas as pd
 import librosa
 from deepface import DeepFace
 import os
-import warnings
+import tensorflow as tf
+import logging
 
-# Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-warnings.filterwarnings('ignore')
+tf.get_logger().setLevel(logging.ERROR)
 
-def extract_all_features(video_path, output_csv="raw_features_for_rohit.csv", step_seconds=1.0):
-    """
-    SUPER HYBRID EXTRACTOR:
-    Combines 'Old Engineering Metrics' (Pitch, Motion) 
-    with 'New AI Metrics' (Emotions).
-    """
-    if not os.path.exists(video_path):
-        print("❌ Video file not found.")
-        return None
+def extract_audio_features(video_path, fps):
+    print("   🎧 Reading Audio...")
+    y, sr = librosa.load(video_path, sr=None)
+    hop_length = int(sr / fps)
+    rms = librosa.feature.rms(y=y, frame_length=hop_length, hop_length=hop_length)[0]
+    if rms.max() > 0: rms = rms / rms.max()
+    return rms
 
-    print(f"🎬 Starting SUPER HYBRID analysis on: {video_path}")
+def extract_all_features(video_path, output_csv=None):
+    print(f"🕵️‍♀️ SPYING ON: {video_path}")
     
-    # --- 1. AUDIO SETUP ---
-    try:
-        y, sr = librosa.load(video_path, sr=None)
-    except Exception:
-        y, sr = None, None
-
-    # --- 2. VIDEO SETUP ---
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_step = int(fps * step_seconds)
+    if fps == 0: fps = 30
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    data = []
-    current_frame = 0
-    prev_gray = None # To calculate motion
-
-    print("🧠 Extracting: [Pitch/Motion] (Old) + [Emotions] (New)...")
-
-    while True:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+    features = []
+    prev_gray = None
+    
+    # 1. First Pass: Extract Motion & Emotion
+    print(f"   🎞️ Analyzing {frame_count} frames...")
+    
+    frame_idx = 0
+    while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
-
-        timestamp = current_frame / fps
+            
+        small_frame = cv2.resize(frame, (640, 360))
+        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
         
-        # --- A. VISUAL METRICS ---
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        brightness = np.mean(gray) / 255.0
-        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
-        
-        # Calculate Motion (Difference between this frame and previous frame)
+        # Motion
         motion_score = 0.0
         if prev_gray is not None:
             diff = cv2.absdiff(prev_gray, gray)
-            motion_score = np.mean(diff) / 255.0
+            motion_score = np.sum(diff) / (640 * 360)
         prev_gray = gray
-        
-        # --- B. AUDIO METRICS ---
-        rms_volume = 0
-        zcr_pitch = 0 # Zero Crossing Rate (Proxy for pitch/energy)
-        
-        if y is not None:
-            start = int(timestamp * sr)
-            end = int((timestamp + step_seconds) * sr)
-            if end < len(y):
-                chunk = y[start:end]
-                # Volume
-                rms_volume = float(np.sqrt(np.mean(chunk**2)))
-                # Pitch/Frequency (ZCR)
-                zcr_pitch = float(np.mean(librosa.feature.zero_crossing_rate(chunk)))
 
-        # --- C. EMOTION METRICS ---
-        # Defaults
-        dom_emotion = "neutral"
-        p_happy, p_surprise, p_sad, p_neutral = 0.0, 0.0, 0.0, 0.0
-        
-        try:
-            # Fast DeepFace Analysis
-            analysis = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False)
-            if isinstance(analysis, list): analysis = analysis[0]
-            
-            scores = analysis['emotion']
-            dom_emotion = analysis['dominant_emotion']
-            
-            p_happy = scores.get('happy', 0) / 100.0
-            p_surprise = scores.get('surprise', 0) / 100.0
-            p_sad = scores.get('sad', 0) / 100.0
-            p_neutral = scores.get('neutral', 0) / 100.0
-            
-            print(f"⏱️ {timestamp:.1f}s | Mot: {motion_score:.3f} | Vol: {rms_volume:.3f} | Emo: {dom_emotion}")
-            
-        except Exception:
-            pass 
+        # Emotion (Every 5th frame)
+        prob_happy = 0.0
+        prob_surprise = 0.0
+        if frame_idx % 5 == 0:
+            try:
+                objs = DeepFace.analyze(img_path=small_frame, actions=['emotion'], 
+                                        enforce_detection=False, silent=True, detector_backend='opencv')
+                if objs:
+                    emotions = objs[0]['emotion']
+                    prob_happy = emotions.get('happy', 0) / 100.0
+                    prob_surprise = emotions.get('surprise', 0) / 100.0
+            except: pass
+        elif features:
+            prob_happy = features[-1]['prob_happy']
+            prob_surprise = features[-1]['prob_surprise']
 
-        # --- D. BUILD THE HYBRID ROW ---
-        row = {
-            # 1. The OLD Columns (Essential for structure)
-            "timestamp": round(timestamp, 2),
-            "rms_volume": round(rms_volume, 4),
-            "zcr_pitch": round(zcr_pitch, 4),      # <--- Restored!
-            "motion_score": round(motion_score, 4), # <--- Restored!
-            "brightness": round(brightness, 3),
-            
-            # 2. The NEW Columns (Added for better AI)
-            "blur_check": round(blur_score, 1),
-            "dominant_emotion": dom_emotion,
-            "prob_happy": p_happy,
-            "prob_surprise": p_surprise,
-            "prob_sad": p_sad,
-            "prob_neutral": p_neutral
-        }
-        data.append(row)
-        current_frame += frame_step
+        features.append({
+            'timestamp': frame_idx / fps,
+            'motion_score': motion_score,
+            'prob_happy': prob_happy,
+            'prob_surprise': prob_surprise
+        })
+        frame_idx += 1
 
     cap.release()
     
-    # Organize columns strictly
-    cols = [
-        "timestamp", "rms_volume", "zcr_pitch", "motion_score", "brightness", # OLD GROUP
-        "blur_check", "dominant_emotion", "prob_happy", "prob_surprise", "prob_sad", "prob_neutral" # NEW GROUP
-    ]
-    
-    df = pd.DataFrame(data)
-    # Ensure only valid columns are written, in correct order
-    df = df[cols]
-    
-    df.to_csv(output_csv, index=False)
-    print(f"✅ HYBRID DATA SAVED: {output_csv}")
-    print(f"   Includes: Motion, Pitch, Volume, Brightness + EMOTIONS")
-    return df
+    # 2. Add Audio
+    df = pd.DataFrame(features)
+    try:
+        audio_rms = extract_audio_features(video_path, fps)
+        if len(audio_rms) > len(df): audio_rms = audio_rms[:len(df)]
+        else: audio_rms = np.pad(audio_rms, (0, len(df) - len(audio_rms)))
+        df['rms_volume'] = audio_rms
+    except: df['rms_volume'] = 0
 
-if __name__ == "__main__":
-    extract_all_features("input_video.mp4")
+    # --- 3. THE "HIGHLIGHT" LOGIC (Punch Detector) ---
+    # A punch is defined as: HIGH Motion (> 0.5) AND HIGH Volume (> 0.4) at the same time.
+    # We create a new column 'is_highlight'.
+    
+    print("   🥊 Calculating Action Highlights (Punch Logic)...")
+    
+    # You can tweak these thresholds. 
+    # 0.5 motion is usually a fast swing. 0.4 volume is a loud impact.
+    df['is_highlight'] = ((df['motion_score'] > 0.5) & (df['rms_volume'] > 0.4)).astype(int)
+    
+    # Optional: Expand the highlight (if a punch lasts 0.1s, we want to see 1s around it)
+    # This "smears" the highlight to include the moments before/after the punch
+    df['is_highlight'] = df['is_highlight'].rolling(window=int(fps), center=True, min_periods=1).max().fillna(0)
+
+    # 4. Save
+    if output_csv:
+        df.to_csv(output_csv, index=False)
+        print(f"✅ Data Saved: {output_csv}")
+        
+    return df

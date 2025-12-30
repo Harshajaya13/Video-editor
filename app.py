@@ -58,17 +58,16 @@ with tab1:
     if st.session_state['df_features'] is not None:
         csv = st.session_state['df_features'].to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Raw CSV", csv, "raw_features.csv", "text/csv")
-        
- # ==========================================
-# TAB 2: AI EDITING (The Brain & Scissors)
+ # ... (Keep imports and Tab 1 as is) ...
+
+# ==========================================
+# TAB 2: AI EDITING
 # ==========================================
 with tab2:
     st.header("🎬 Step 2: Create the Edit")
     
-    # 1. UPLOAD BOX (Works for BOTH Raw files and Rohit's files)
-    uploaded_csv = st.file_uploader("Upload CSV (Raw from Tab 1 OR Scored from Rohit)", type=["csv"])
+    uploaded_csv = st.file_uploader("Upload CSV", type=["csv"])
     
-    # Determine which DataFrame to use
     active_df = None
     if uploaded_csv:
         active_df = pd.read_csv(uploaded_csv)
@@ -78,76 +77,72 @@ with tab2:
     if active_df is not None:
         st.divider()
         
-        # --- SMART LOGIC: Is this Rohit's file or a Raw file? ---
+        # --- CHECK FOR HIGHLIGHTS ---
+        has_highlights = 'is_highlight' in active_df.columns and active_df['is_highlight'].sum() > 0
         
-        # Check if Rohit already gave us a score (looking for 'score', 'pred', or 'engagement_score')
-        # We normalize everything to 'engagement_score'
-        is_pre_scored = False
+        if has_highlights:
+            st.success(f"🥊 Action Highlights Detected! ({int(active_df['is_highlight'].sum())} frames)")
+            # Show a chart of where the punches are
+            st.caption("Highlight Timeline (1 = Action Detected)")
+            st.area_chart(active_df['is_highlight'], height=100, color="#ff4b4b")
         
-        if 'score' in active_df.columns:
+        # --- SCORING LOGIC ---
+        st.subheader("🧠 Editing Logic")
+        
+        # Check for Rohit's Score
+        if 'score' in active_df.columns: 
             active_df['engagement_score'] = active_df['score']
-            is_pre_scored = True
-        elif 'pred' in active_df.columns:
-            active_df['engagement_score'] = active_df['pred']
-            is_pre_scored = True
-        elif 'engagement_score' in active_df.columns:
-            is_pre_scored = True
-
-        # --- PATH A: ROHIT'S FILE (Pre-Scored) ---
-        if is_pre_scored:
-            st.success("✨ Rohit's Pre-Scored Data Detected! Skipping manual calculation.")
-            st.line_chart(active_df['engagement_score'])
-            
-        # --- PATH B: RAW FILE (Manual Calculation) ---
+            st.info("Using Pre-Calculated Scores.")
         else:
-            st.subheader("🧠 The Brain: Define 'Engagement'")
-            st.info("No score found. Using Manual Sliders.")
-            
             col1, col2, col3, col4 = st.columns(4)
-            with col1: w_vol = st.slider("🔊 Volume Weight", 0.0, 5.0, 1.0)
-            with col2: w_happy = st.slider("😊 Happy Weight", 0.0, 5.0, 2.0)
-            with col3: w_shock = st.slider("😲 Surprise Weight", 0.0, 5.0, 2.5)
-            with col4: w_motion = st.slider("🏃 Motion Weight", 0.0, 5.0, 1.0)
+            with col1: w_vol = st.slider("🔊 Volume", 0.0, 5.0, 1.0)
+            with col2: w_happy = st.slider("😊 Happy", 0.0, 5.0, 2.0)
+            with col3: w_shock = st.slider("😲 Surprise", 0.0, 5.0, 2.5)
+            with col4: w_motion = st.slider("🏃 Motion", 0.0, 5.0, 1.0)
 
-            # Normalize Volume
-            max_vol = active_df['rms_volume'].max()
-            if max_vol == 0: max_vol = 1
-            active_df['norm_vol'] = active_df['rms_volume'] / max_vol
+            # Standard Calc
+            active_df['norm_vol'] = active_df['rms_volume'] / active_df['rms_volume'].max()
+            for col in ['prob_happy', 'prob_surprise', 'motion_score']:
+                if col not in active_df: active_df[col] = 0
 
-            # Safety checks for missing columns
-            if 'prob_happy' not in active_df: active_df['prob_happy'] = 0
-            if 'prob_surprise' not in active_df: active_df['prob_surprise'] = 0
-            if 'motion_score' not in active_df: active_df['motion_score'] = 0
-
-            # CALCULATE SCORE MANUALLY
             active_df['engagement_score'] = (
                 (active_df['norm_vol'] * w_vol) +
                 (active_df['prob_happy'] * w_happy) +
                 (active_df['prob_surprise'] * w_shock) +
                 (active_df['motion_score'] * w_motion)
             )
-            st.line_chart(active_df['engagement_score'])
 
-        # --- B. EDITING CONTROLS (The Scissors) ---
-        # This part runs for BOTH paths!
+        # --- THE CUT ---
         st.divider()
-        st.subheader("✂️ The Cut")
+        col_cut1, col_cut2 = st.columns(2)
+        with col_cut1:
+            strictness = st.slider("Strictness (Keep Top %)", 0.1, 1.0, 0.4)
+            threshold = active_df['engagement_score'].quantile(1.0 - strictness)
+            
+        with col_cut2:
+            # THE MAGIC SWITCH
+            force_highlights = st.checkbox("🔥 Always Keep Highlights?", value=True, 
+                                          help="If checked, any 'Punch/Action' detected will be kept, even if the score is low.")
+
+        # --- FINAL DECISION LOGIC ---
+        def make_decision(row):
+            # 1. If it's a Highlight AND we want to force keep it -> KEEP (1)
+            if force_highlights and row.get('is_highlight', 0) == 1:
+                return 1
+            # 2. Otherwise, check the score against the threshold
+            elif row['engagement_score'] >= threshold:
+                return 1
+            # 3. Otherwise, cut it
+            else:
+                return 0
+
+        active_df['ai_decision'] = active_df.apply(make_decision, axis=1)
         
-        strictness = st.slider("Strictness (Keep Top %)", 0.1, 1.0, 0.4)
-        
-        # Calculate Threshold
-        threshold = active_df['engagement_score'].quantile(1.0 - strictness)
-        st.write(f"**Keeping segments with Score > {threshold:.2f}**")
-        
-        # APPLY DECISION (Create the 'ai_decision' column)
-        active_df['ai_decision'] = active_df['engagement_score'].apply(lambda x: 1 if x >= threshold else 0)
-        
-        keep_count = active_df['ai_decision'].sum()
-        st.caption(f"Will keep {keep_count} seconds of video.")
+        st.caption(f"Will keep {active_df['ai_decision'].sum()} frames.")
 
         if st.button("✨ Render Final Video"):
             if st.session_state['video_path']:
-                with st.spinner("Cutting and stitching..."):
+                with st.spinner("Cutting (Prioritizing Highlights)..."):
                     output_file = editor_engine.process_and_render(
                         st.session_state['video_path'], 
                         active_df
@@ -155,7 +150,3 @@ with tab2:
                     if output_file:
                         st.success("🎉 Done!")
                         st.video(output_file)
-            else:
-                st.error("Video file is missing.")
-    else:
-        st.info("Waiting for data... Go to Tab 1 to analyze a video OR upload a CSV here.")
