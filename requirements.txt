@@ -4,6 +4,7 @@ numpy
 moviepy==1.0.3
 librosa
 opencv-python-headless
-tensorflow-cpu
+tensorflow-cpu==2.15.0
+keras==2.15.0
 deepface
 tf-keras
