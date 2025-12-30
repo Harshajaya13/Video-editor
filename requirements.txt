@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+moviepy==1.0.3
+librosa
+opencv-python-headless
+tensorflow-cpu
+deepface
